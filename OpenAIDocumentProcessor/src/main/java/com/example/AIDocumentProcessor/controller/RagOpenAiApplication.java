@@ -23,7 +23,7 @@ import com.fasterxml.jackson.databind.node.*;
 @RequestMapping("/api/rag-openai")
 public class RagOpenAiApplication {
 
-    private static final String OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"; // Replace with your OpenAI API keys
+    private static final String OPENAI_API_KEY = ""; // Replace with your OpenAI API keys
     private static final String EMBEDDING_MODEL = "text-embedding-3-small";
     private static final String CHAT_MODEL = "gpt-4o";
     private static final String JSON_MODEL = "gpt-4o";

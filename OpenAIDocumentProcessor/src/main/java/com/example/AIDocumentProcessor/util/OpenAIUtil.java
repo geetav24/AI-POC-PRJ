@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 public class OpenAIUtil  {
-    private static final String API_KEY = "YOUR_OPENAI_API_KEY"; // Replace with your OpenAI API key
+    private static final String API_KEY = ""; // Replace with your OpenAI API key
     private static final HttpClient client = HttpClient.newHttpClient();
     private static final ObjectMapper mapper = new ObjectMapper();
 
