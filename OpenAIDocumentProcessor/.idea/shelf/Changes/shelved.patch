@@ -1,0 +1,1108 @@
+Index: build.gradle
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/build.gradle b/build.gradle
+new file mode 100644
+--- /dev/null	(date 1753040796832)
++++ b/build.gradle	(date 1753040796832)
+@@ -0,0 +1,65 @@
++plugins {
++	id 'java'
++	id 'org.springframework.boot' version '3.4.5'
++	id 'io.spring.dependency-management' version '1.1.7'
++}
++
++group = 'com.codefarm'
++version = '0.0.1-SNAPSHOT'
++
++java {
++	toolchain {
++		languageVersion = JavaLanguageVersion.of(21)
++	}
++}
++
++configurations {
++	compileOnly {
++		extendsFrom annotationProcessor
++	}
++}
++
++repositories {
++	mavenCentral()
++	maven { url = uri("https://repo.spring.io/milestone") }
++}
++
++ext {
++	set('springAiVersion', "1.0.0-RC1")
++}
++
++dependencies {
++	implementation 'org.springframework.boot:spring-boot-starter-web'
++	implementation 'org.springframework.ai:spring-ai-starter-model-openai'
++
++	implementation 'org.springframework.ai:spring-ai-vector-store'
++	// https://mvnrepository.com/artifact/group.springframework.ai/spring-ai-tika-document-reader
++	implementation 'org.springframework.ai:spring-ai-tika-document-reader'
++// PDF parsing
++	implementation 'org.apache.pdfbox:pdfbox:2.0.30'
++	implementation 'org.apache.pdfbox:fontbox:2.0.30'
++	// DOCX parsing
++	implementation 'org.apache.poi:poi-ooxml:5.2.5'
++
++	// JSON processing
++	implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.1'
++
++
++
++	// Lombok for dev convenience (optional)
++	compileOnly 'org.projectlombok:lombok:1.18.30'
++	annotationProcessor 'org.projectlombok:lombok:1.18.30'
++
++	testImplementation 'org.springframework.boot:spring-boot-starter-test'
++	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
++}
++
++dependencyManagement {
++	imports {
++		mavenBom "org.springframework.ai:spring-ai-bom:${springAiVersion}"
++	}
++}
++
++tasks.named('test') {
++	useJUnitPlatform()
++}
+Index: settings.gradle
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/settings.gradle b/settings.gradle
+new file mode 100644
+--- /dev/null	(date 1753040796836)
++++ b/settings.gradle	(date 1753040796836)
+@@ -0,0 +1,1 @@
++rootProject.name = 'AIDocumentProcessor'
+Index: src/main/java/com/example/AIDocumentProcessor/controller/RagOpenAiApplication.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/controller/RagOpenAiApplication.java b/src/main/java/com/example/AIDocumentProcessor/controller/RagOpenAiApplication.java
+new file mode 100644
+--- /dev/null	(date 1753040796839)
++++ b/src/main/java/com/example/AIDocumentProcessor/controller/RagOpenAiApplication.java	(date 1753040796839)
+@@ -0,0 +1,217 @@
++package com.example.AIDocumentProcessor.controller;
++import org.apache.pdfbox.pdmodel.PDDocument;
++import org.apache.pdfbox.text.PDFTextStripper;
++import org.apache.poi.xwpf.usermodel.XWPFDocument;
++import org.apache.poi.xwpf.usermodel.XWPFParagraph;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.*;
++import org.springframework.web.multipart.MultipartFile;
++
++import java.io.*;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.util.*;
++import java.util.stream.Collectors;
++
++import com.fasterxml.jackson.databind.*;
++import com.fasterxml.jackson.databind.node.*;
++
++@RestController
++@RequestMapping("/api/rag-openai")
++public class RagOpenAiApplication {
++
++    private static final String OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"; // Replace with your OpenAI API key
++    private static final String EMBEDDING_MODEL = "text-embedding-3-small";
++    private static final String CHAT_MODEL = "gpt-4o";
++    private static final String JSON_MODEL = "gpt-4o";
++    private static final HttpClient httpClient = HttpClient.newHttpClient();
++    private static final ObjectMapper mapper = new ObjectMapper();
++
++    private static final List<VectorRecord> vectorStore = new ArrayList<>();
++    private static JsonNode documentJson = NullNode.getInstance();
++
++    @PostMapping("/upload")
++    public ResponseEntity<String> uploadAndProcess(@RequestParam("file") MultipartFile file) throws IOException, InterruptedException {
++        File convFile = new File("./uploads/" + file.getOriginalFilename());
++        convFile.getParentFile().mkdirs();
++        try (FileOutputStream fos = new FileOutputStream(convFile)) {
++            fos.write(file.getBytes());
++        }
++
++        String extractedText = extractText(convFile);
++        documentJson = textToJsonViaOpenAI(extractedText);
++        List<String> chunks = chunkText(extractedText, 500);
++
++        for (String chunk : chunks) {
++            double[] embedding = getOpenAiEmbedding(chunk);
++            vectorStore.add(new VectorRecord(UUID.randomUUID().toString(), chunk, embedding));
++        }
++
++        return ResponseEntity.ok("File processed, converted to JSON, and vectors stored with json."+documentJson.get("Name").asText() +" end of json");
++    }
++
++    @PostMapping("/query")
++    public ResponseEntity<JsonNode> queryJson(@RequestBody Map<String, String> request) {
++        String key = request.get("key");
++        JsonNode result = documentJson.at("/" + key);
++        return ResponseEntity.ok(result.isMissingNode() ? TextNode.valueOf("Key not found") : result);
++    }
++
++    @PostMapping("/chat")
++    public ResponseEntity<String> chat(@RequestBody Map<String, String> request) throws IOException, InterruptedException {
++        String query = request.get("question");
++        double[] queryEmbedding = getOpenAiEmbedding(query);
++
++        List<String> topChunks = similaritySearch(queryEmbedding, 3)
++                .stream()
++                .map(vr -> vr.chunk)
++                .collect(Collectors.toList());
++
++        String prompt = String.join("\n---\n", topChunks) + "\n\nAnswer the user's query: " + query;
++        String answer = callOpenAiChat(prompt);
++
++        return ResponseEntity.ok(answer);
++    }
++
++    private String extractText(File file) throws IOException {
++        String name = file.getName().toLowerCase();
++        if (name.endsWith(".pdf")) {
++            try (PDDocument document = PDDocument.load(file)) {
++                PDFTextStripper pdfStripper = new PDFTextStripper();
++                return pdfStripper.getText(document);
++            }
++        } else if (name.endsWith(".docx")) {
++            try (FileInputStream fis = new FileInputStream(file); XWPFDocument doc = new XWPFDocument(fis)) {
++                StringBuilder sb = new StringBuilder();
++                for (XWPFParagraph p : doc.getParagraphs()) {
++                    sb.append(p.getText()).append("\n");
++                }
++                return sb.toString();
++            }
++        }
++        throw new IOException("Unsupported file type: " + name);
++    }
++
++    private JsonNode textToJson(String text) {
++        ObjectNode json = mapper.createObjectNode();
++        String[] lines = text.split("\\r?\\n");
++        for (String line : lines) {
++            if (line.contains(":")) {
++                String[] parts = line.split(":", 2);
++                json.put(parts[0].trim().replaceAll("\\s+", "_"), parts[1].trim());
++            }
++        }
++        return json;
++    }
++
++    private List<String> chunkText(String text, int maxTokens) {
++        String[] sentences = text.split("\\. ");
++        List<String> chunks = new ArrayList<>();
++        StringBuilder chunk = new StringBuilder();
++        for (String sentence : sentences) {
++            if (chunk.length() + sentence.length() > maxTokens * 5) {
++                chunks.add(chunk.toString());
++                chunk = new StringBuilder();
++            }
++            chunk.append(sentence).append(". ");
++        }
++        if (chunk.length() > 0) chunks.add(chunk.toString());
++        return chunks;
++    }
++
++    record VectorRecord(String id, String chunk, double[] embedding) {}
++
++    private List<VectorRecord> similaritySearch(double[] query, int topK) {
++        return vectorStore.stream()
++                .sorted(Comparator.comparingDouble(v -> -cosineSimilarity(query, v.embedding)))
++                .limit(topK)
++                .collect(Collectors.toList());
++    }
++
++    private double cosineSimilarity(double[] a, double[] b) {
++        double dot = 0.0, normA = 0.0, normB = 0.0;
++        for (int i = 0; i < a.length; i++) {
++            dot += a[i] * b[i];
++            normA += a[i] * a[i];
++            normB += b[i] * b[i];
++        }
++        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
++    }
++
++    private double[] getOpenAiEmbedding(String text) throws IOException, InterruptedException {
++        ObjectNode requestJson = mapper.createObjectNode();
++        requestJson.put("model", EMBEDDING_MODEL);
++        requestJson.putArray("input").add(text);
++
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/embeddings"))
++                .header("Authorization", "Bearer " + OPENAI_API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(requestJson)))
++                .build();
++
++        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
++        System.out.println("response response: " + response);
++        JsonNode json = mapper.readTree(response.body());
++        System.out.println("Embedding response: " + json.toString());
++        JsonNode vector = json.get("data").get(0).get("embedding");
++        return mapper.convertValue(vector, double[].class);
++    }
++
++    private String callOpenAiChat(String prompt) throws IOException, InterruptedException {
++        ObjectNode message = mapper.createObjectNode();
++        message.put("role", "user");
++        message.put("content", prompt);
++
++        ObjectNode requestJson = mapper.createObjectNode();
++        requestJson.put("model", CHAT_MODEL);
++        ArrayNode messages = mapper.createArrayNode();
++        messages.add(message);
++        requestJson.set("messages", messages);
++
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/chat/completions"))
++                .header("Authorization", "Bearer " + OPENAI_API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(requestJson), StandardCharsets.UTF_8))
++                .build();
++
++        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
++        JsonNode json = mapper.readTree(response.body());
++        return json.get("choices").get(0).get("message").get("content").asText();
++    }
++    private JsonNode textToJsonViaOpenAI(String text) throws IOException, InterruptedException {
++        ObjectNode message = mapper.createObjectNode();
++        message.put("role", "user");
++        message.put("content", "Return structured JSON format:\n\n" + text);
++
++        ObjectNode requestJson = mapper.createObjectNode();
++        requestJson.put("model", JSON_MODEL);
++        ArrayNode messages = mapper.createArrayNode();
++        messages.add(message);
++        requestJson.set("messages", messages);
++        System.out.println("text: " + text);
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/chat/completions"))
++                .header("Authorization", "Bearer " + OPENAI_API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(requestJson), StandardCharsets.UTF_8))
++                .build();
++        System.out.println("request json: " + request);
++        String content="";
++        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
++        System.out.println("response json: " + response.body());
++
++        JsonNode json = mapper.readTree(response.body());
++        String jscontent = json.get("choices").get(0).get("message").get("content").asText();
++        if(jscontent.indexOf("{") >0 && jscontent.indexOf("}") > 0){
++            content = jscontent.substring(jscontent.indexOf("{"),jscontent.indexOf("}")+1);
++            System.out.println("response content: " +content);
++        }
++        return mapper.readTree(content);
++    }
++
++}
+Index: src/main/resources/application.yml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+new file mode 100644
+--- /dev/null	(date 1753040796842)
++++ b/src/main/resources/application.yml	(date 1753040796842)
+@@ -0,0 +1,34 @@
++spring:
++  application:
++    name: ai-doc-processing-server-webmvc-mcp
++
++  ai:
++    mcp:
++      server:
++        name: ai-doc-processing-server-webmvc-mcp
++        version: 1.0.0
++        type: SYNC
++        instructions: "Document Processing AI Server"
++        sse-endpoint: /api/v1/sse
++        sse-message-endpoint: /api/v1/messages
++        capabilities:
++          tool: true
++          resource: true
++          prompt: true
++          completion: true
++    openai:
++      api-key: "" # Set in your environment
++      embedding:
++        model: text-embedding-ada-002
++    vector-store:
++        type: QDRANT
++        uri: http://localhost:6333
++        enabled: true
++        qdrant:
++          api-key: "" # Set in your environment
++        collection-name: document_embeddings
++logging:
++    level:
++      io.modelcontextprotocol: TRACE
++      org.springframework.ai.mcp: TRACE
++
+Index: src/main/java/com/example/AIDocumentProcessor/util/LlamaUtil.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/util/LlamaUtil.java b/src/main/java/com/example/AIDocumentProcessor/util/LlamaUtil.java
+new file mode 100644
+--- /dev/null	(date 1753040796841)
++++ b/src/main/java/com/example/AIDocumentProcessor/util/LlamaUtil.java	(date 1753040796841)
+@@ -0,0 +1,97 @@
++package com.example.AIDocumentProcessor.util;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.springframework.web.multipart.MultipartFile;
++
++import java.io.IOException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.UUID;
++
++public class LlamaUtil {
++
++    private static final String API_KEY = "ll";
++    private static final HttpClient client = HttpClient.newHttpClient();
++    private static final ObjectMapper mapper = new ObjectMapper();
++
++
++
++    public static String parse(MultipartFile file) throws Exception {
++        Path tempFile = Files.createTempFile("llama-", "-" + file.getOriginalFilename());
++        file.transferTo(tempFile.toFile());
++
++        String boundary = "----WebKitFormBoundary" + UUID.randomUUID();
++        HttpRequest.BodyPublisher bodyPublisher = ofMimeMultipartData(tempFile, boundary);
++
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.cloud.llamaindex.ai/api/v1/parsing/upload"))
++                .header("Authorization", "Bearer " + API_KEY)
++                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
++                .POST(bodyPublisher)
++                .build();
++
++        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
++        String id;
++        if(response.statusCode() != 200) {
++            throw new RuntimeException("Failed to upload file: " + response.body());
++        }else{
++            id = mapper.readTree(response.body()).get("id").asText();
++           waitForLlamaResult(id);
++       }
++        request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.cloud.llamaindex.ai/api/v1/parsing/job/"+id+  "/result/text"))
++                .header("Authorization", "Bearer " + API_KEY)
++                .GET()
++                .build();
++
++        response = client.send(request, HttpResponse.BodyHandlers.ofString());
++
++        Files.deleteIfExists(tempFile);
++        return (mapper.readTree(response.body()).get("text").asText());
++    }
++
++
++
++    private static HttpRequest.BodyPublisher ofMimeMultipartData(Path filePath, String boundary) throws IOException {
++        var byteArrays = new ArrayList<byte[]>();
++
++        // Multipart form field: file
++        byteArrays.add(("--" + boundary + "\r\n").getBytes());
++        byteArrays.add(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filePath.getFileName() + "\"\r\n").getBytes());
++        byteArrays.add(("Content-Type: application/pdf\r\n\r\n").getBytes());
++        byteArrays.add(Files.readAllBytes(filePath));
++        byteArrays.add(("\r\n--" + boundary + "--\r\n").getBytes());
++
++        return HttpRequest.BodyPublishers.ofByteArrays(byteArrays);
++    }
++
++    private static String waitForLlamaResult(String id) throws Exception {
++        int retries = 10;
++        int delaySeconds = 2;
++
++        for (int i = 0; i < retries; i++) {
++            HttpRequest request = HttpRequest.newBuilder()
++                    .uri(URI.create("https://api.cloud.llamaindex.ai/api/v1/parsing/job/" + id))
++                    .header("Authorization", "Bearer " + API_KEY)
++                    .build();
++
++            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
++            JsonNode jsonNode = mapper.readTree(response.body());
++
++            String status = jsonNode.get("status").asText();
++            if ("SUCCESS".equalsIgnoreCase(status)) {
++                return "SUCCESS";
++            }
++
++            Thread.sleep(delaySeconds * 1000);
++        }
++
++        throw new RuntimeException("Llama parsing timed out");
++    }
++}
+\ No newline at end of file
+Index: src/main/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplication.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplication.java b/src/main/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplication.java
+new file mode 100644
+--- /dev/null	(date 1753040796838)
++++ b/src/main/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplication.java	(date 1753040796838)
+@@ -0,0 +1,23 @@
++package com.example.AIDocumentProcessor;
++
++import com.example.AIDocumentProcessor.service.DocumentService;
++import org.springframework.ai.tool.ToolCallbackProvider;
++import org.springframework.ai.tool.method.MethodToolCallbackProvider;
++import org.springframework.boot.SpringApplication;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++import org.springframework.context.annotation.Bean;
++
++@SpringBootApplication
++public class AiDocumentProcessorApplication {
++
++	public static void main(String[] args) {
++		SpringApplication.run(AiDocumentProcessorApplication.class, args);
++	}
++
++	@Bean
++	public ToolCallbackProvider weatherTools(DocumentService documentService) {
++		return MethodToolCallbackProvider.builder().toolObjects(documentService).build();
++	}
++
++
++}
+Index: src/main/java/com/example/AIDocumentProcessor/service/DocumentService.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/service/DocumentService.java b/src/main/java/com/example/AIDocumentProcessor/service/DocumentService.java
+new file mode 100644
+--- /dev/null	(date 1753040796840)
++++ b/src/main/java/com/example/AIDocumentProcessor/service/DocumentService.java	(date 1753040796840)
+@@ -0,0 +1,52 @@
++package com.example.AIDocumentProcessor.service;
++
++import com.example.AIDocumentProcessor.util.LlamaUtil;
++import com.example.AIDocumentProcessor.util.OpenAIUtil;
++import org.springframework.ai.embedding.EmbeddingModel;
++import org.springframework.ai.embedding.EmbeddingRequest;
++import org.springframework.ai.embedding.EmbeddingResponse;
++import org.springframework.ai.tool.annotation.Tool;
++import org.springframework.ai.vectorstore.SimpleVectorStore;
++import org.springframework.stereotype.Service;
++import org.springframework.web.bind.annotation.RequestParam;
++import org.springframework.web.multipart.MultipartFile;
++import java.io.IOException;
++import java.util.List;
++
++@Service
++public class DocumentService {
++    private  EmbeddingModel embeddingModel;
++    private  SimpleVectorStore vectorStore;
++
++    @Tool(description = "Upload a document by providing its path")
++    public String upload(@RequestParam MultipartFile file) throws Exception {
++        try {
++            SimpleVectorStore vectorStore = SimpleVectorStore.builder(embeddingModel).build();
++            String text = LlamaUtil.parse(file);
++            List<String> chunks = chunkText(text);
++            for (String chunk : chunks) {
++                float[] embedding;
++                try {
++                    embedding = OpenAIUtil.getEmbedding(chunk);
++                } catch (Exception e) {
++                    e.printStackTrace();
++                    return "Error generating embedding: " + e.getMessage();
++                }
++            }
++            // You can now save it, extract data, or send to embedding engine
++            // For now, let's simulate storing the file
++          //  return "File successfully read from: " + filePath ;
++
++        } catch (IOException e) {
++            e.printStackTrace();
++            return "Error reading file: " + e.getMessage();
++        }
++        return "Document uploaded successfully.";
++    }
++
++
++    private List<String> chunkText(String text) {
++        return List.of(text.split("(?<=\\G.{500})"));
++    }
++
++}
+\ No newline at end of file
+Index: src/test/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplicationTests.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/test/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplicationTests.java b/src/test/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplicationTests.java
+new file mode 100644
+--- /dev/null	(date 1753040796844)
++++ b/src/test/java/com/example/AIDocumentProcessor/AiDocumentProcessorApplicationTests.java	(date 1753040796844)
+@@ -0,0 +1,11 @@
++package com.example.AIDocumentProcessor;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++
++@SpringBootTest
++class AiDocumentProcessorApplicationTests {
++
++
++
++}
+Index: gradlew
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/gradlew b/gradlew
+new file mode 100755
+--- /dev/null	(date 1753040796835)
++++ b/gradlew	(date 1753040796835)
+@@ -0,0 +1,249 @@
++#!/bin/sh
++
++#
++# Copyright © 2015-2021 the original authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      https://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++##############################################################################
++#
++#   Gradle start up script for POSIX generated by Gradle.
++#
++#   Important for running:
++#
++#   (1) You need a POSIX-compliant shell to run this script. If your /bin/sh is
++#       noncompliant, but you have some other compliant shell such as ksh or
++#       bash, then to run this script, type that shell name before the whole
++#       command line, like:
++#
++#           ksh Gradle
++#
++#       Busybox and similar reduced shells will NOT work, because this script
++#       requires all of these POSIX shell features:
++#         * functions;
++#         * expansions «$var», «${var}», «${var:-default}», «${var+SET}»,
++#           «${var#prefix}», «${var%suffix}», and «$( cmd )»;
++#         * compound commands having a testable exit status, especially «case»;
++#         * various built-in commands including «command», «set», and «ulimit».
++#
++#   Important for patching:
++#
++#   (2) This script targets any POSIX shell, so it avoids extensions provided
++#       by Bash, Ksh, etc; in particular arrays are avoided.
++#
++#       The "traditional" practice of packing multiple parameters into a
++#       space-separated string is a well documented source of bugs and security
++#       problems, so this is (mostly) avoided, by progressively accumulating
++#       options in "$@", and eventually passing that to Java.
++#
++#       Where the inherited environment variables (DEFAULT_JVM_OPTS, JAVA_OPTS,
++#       and GRADLE_OPTS) rely on word-splitting, this is performed explicitly;
++#       see the in-line comments for details.
++#
++#       There are tweaks for specific operating systems such as AIX, CygWin,
++#       Darwin, MinGW, and NonStop.
++#
++#   (3) This script is generated from the Groovy template
++#       https://github.com/gradle/gradle/blob/HEAD/subprojects/plugins/src/main/resources/org/gradle/api/internal/plugins/unixStartScript.txt
++#       within the Gradle project.
++#
++#       You can find Gradle at https://github.com/gradle/gradle/.
++#
++##############################################################################
++
++# Attempt to set APP_HOME
++
++# Resolve links: $0 may be a link
++app_path=$0
++
++# Need this for daisy-chained symlinks.
++while
++    APP_HOME=${app_path%"${app_path##*/}"}  # leaves a trailing /; empty if no leading path
++    [ -h "$app_path" ]
++do
++    ls=$( ls -ld "$app_path" )
++    link=${ls#*' -> '}
++    case $link in             #(
++      /*)   app_path=$link ;; #(
++      *)    app_path=$APP_HOME$link ;;
++    esac
++done
++
++# This is normally unused
++# shellcheck disable=SC2034
++APP_BASE_NAME=${0##*/}
++# Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
++APP_HOME=$( cd "${APP_HOME:-./}" > /dev/null && pwd -P ) || exit
++
++# Use the maximum available, or set MAX_FD != -1 to use that value.
++MAX_FD=maximum
++
++warn () {
++    echo "$*"
++} >&2
++
++die () {
++    echo
++    echo "$*"
++    echo
++    exit 1
++} >&2
++
++# OS specific support (must be 'true' or 'false').
++cygwin=false
++msys=false
++darwin=false
++nonstop=false
++case "$( uname )" in                #(
++  CYGWIN* )         cygwin=true  ;; #(
++  Darwin* )         darwin=true  ;; #(
++  MSYS* | MINGW* )  msys=true    ;; #(
++  NONSTOP* )        nonstop=true ;;
++esac
++
++CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
++
++
++# Determine the Java command to use to start the JVM.
++if [ -n "$JAVA_HOME" ] ; then
++    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
++        # IBM's JDK on AIX uses strange locations for the executables
++        JAVACMD=$JAVA_HOME/jre/sh/java
++    else
++        JAVACMD=$JAVA_HOME/bin/java
++    fi
++    if [ ! -x "$JAVACMD" ] ; then
++        die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
++
++Please set the JAVA_HOME variable in your environment to match the
++location of your Java installation."
++    fi
++else
++    JAVACMD=java
++    if ! command -v java >/dev/null 2>&1
++    then
++        die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
++
++Please set the JAVA_HOME variable in your environment to match the
++location of your Java installation."
++    fi
++fi
++
++# Increase the maximum file descriptors if we can.
++if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
++    case $MAX_FD in #(
++      max*)
++        # In POSIX sh, ulimit -H is undefined. That's why the result is checked to see if it worked.
++        # shellcheck disable=SC2039,SC3045
++        MAX_FD=$( ulimit -H -n ) ||
++            warn "Could not query maximum file descriptor limit"
++    esac
++    case $MAX_FD in  #(
++      '' | soft) :;; #(
++      *)
++        # In POSIX sh, ulimit -n is undefined. That's why the result is checked to see if it worked.
++        # shellcheck disable=SC2039,SC3045
++        ulimit -n "$MAX_FD" ||
++            warn "Could not set maximum file descriptor limit to $MAX_FD"
++    esac
++fi
++
++# Collect all arguments for the java command, stacking in reverse order:
++#   * args from the command line
++#   * the main class name
++#   * -classpath
++#   * -D...appname settings
++#   * --module-path (only if needed)
++#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and GRADLE_OPTS environment variables.
++
++# For Cygwin or MSYS, switch paths to Windows format before running java
++if "$cygwin" || "$msys" ; then
++    APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
++    CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
++
++    JAVACMD=$( cygpath --unix "$JAVACMD" )
++
++    # Now convert the arguments - kludge to limit ourselves to /bin/sh
++    for arg do
++        if
++            case $arg in                                #(
++              -*)   false ;;                            # don't mess with options #(
++              /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
++                    [ -e "$t" ] ;;                      #(
++              *)    false ;;
++            esac
++        then
++            arg=$( cygpath --path --ignore --mixed "$arg" )
++        fi
++        # Roll the args list around exactly as many times as the number of
++        # args, so each arg winds up back in the position where it started, but
++        # possibly modified.
++        #
++        # NB: a `for` loop captures its iteration list before it begins, so
++        # changing the positional parameters here affects neither the number of
++        # iterations, nor the values presented in `arg`.
++        shift                   # remove old arg
++        set -- "$@" "$arg"      # push replacement arg
++    done
++fi
++
++
++# Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
++DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
++
++# Collect all arguments for the java command:
++#   * DEFAULT_JVM_OPTS, JAVA_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,
++#     and any embedded shellness will be escaped.
++#   * For example: A user cannot expect ${Hostname} to be expanded, as it is an environment variable and will be
++#     treated as '${Hostname}' itself on the command line.
++
++set -- \
++        "-Dorg.gradle.appname=$APP_BASE_NAME" \
++        -classpath "$CLASSPATH" \
++        org.gradle.wrapper.GradleWrapperMain \
++        "$@"
++
++# Stop when "xargs" is not available.
++if ! command -v xargs >/dev/null 2>&1
++then
++    die "xargs is not available"
++fi
++
++# Use "xargs" to parse quoted args.
++#
++# With -n1 it outputs one arg per line, with the quotes and backslashes removed.
++#
++# In Bash we could simply go:
++#
++#   readarray ARGS < <( xargs -n1 <<<"$var" ) &&
++#   set -- "${ARGS[@]}" "$@"
++#
++# but POSIX shell has neither arrays nor command substitution, so instead we
++# post-process each arg (as a line of input to sed) to backslash-escape any
++# character that might be a shell metacharacter, then use eval to reverse
++# that process (while maintaining the separation between arguments), and wrap
++# the whole thing up as a single "set" statement.
++#
++# This will of course break if any of these variables contains a newline or
++# an unmatched quote.
++#
++
++eval "set -- $(
++        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
++        xargs -n1 |
++        sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
++        tr '\n' ' '
++    )" '"$@"'
++
++exec "$JAVACMD" "$@"
+Index: src/main/java/com/example/AIDocumentProcessor/package-info.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/package-info.java b/src/main/java/com/example/AIDocumentProcessor/package-info.java
+new file mode 100644
+--- /dev/null	(date 1753040796839)
++++ b/src/main/java/com/example/AIDocumentProcessor/package-info.java	(date 1753040796839)
+@@ -0,0 +1,1 @@
++package com.example.AIDocumentProcessor;
+\ No newline at end of file
+Index: .gitignore
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+--- /dev/null	(date 1753040796831)
++++ b/.gitignore	(date 1753040796831)
+@@ -0,0 +1,37 @@
++README.md
++.gradle
++build/
++!gradle/wrapper/gradle-wrapper.jar
++!**/src/main/**/build/
++!**/src/test/**/build/
++
++### STS ###
++.apt_generated
++.classpath
++.factorypath
++.project
++.settings
++.springBeans
++.sts4-cache
++bin/
++!**/src/main/**/bin/
++!**/src/test/**/bin/
++
++### IntelliJ IDEA ###
++.idea
++*.iws
++*.iml
++*.ipr
++out/
++!**/src/main/**/out/
++!**/src/test/**/out/
++
++### NetBeans ###
++/nbproject/private/
++/nbbuild/
++/dist/
++/nbdist/
++/.nb-gradle/
++
++### VS Code ###
++.vscode/
+Index: gradle/wrapper/gradle-wrapper.properties
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>ISO-8859-1
+===================================================================
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+new file mode 100644
+--- /dev/null	(date 1753040796835)
++++ b/gradle/wrapper/gradle-wrapper.properties	(date 1753040796835)
+@@ -0,0 +1,7 @@
++distributionBase=GRADLE_USER_HOME
++distributionPath=wrapper/dists
++distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
++networkTimeout=10000
++validateDistributionUrl=true
++zipStoreBase=GRADLE_USER_HOME
++zipStorePath=wrapper/dists
+Index: .gitattributes
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+--- /dev/null	(date 1753040796830)
++++ b/.gitattributes	(date 1753040796830)
+@@ -0,0 +1,3 @@
++/gradlew text eol=lf
++*.bat text eol=crlf
++*.jar binary
+Index: src/main/java/com/example/AIDocumentProcessor/util/OpenAIUtil.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/main/java/com/example/AIDocumentProcessor/util/OpenAIUtil.java b/src/main/java/com/example/AIDocumentProcessor/util/OpenAIUtil.java
+new file mode 100644
+--- /dev/null	(date 1753040796841)
++++ b/src/main/java/com/example/AIDocumentProcessor/util/OpenAIUtil.java	(date 1753040796841)
+@@ -0,0 +1,66 @@
++package com.example.AIDocumentProcessor.util;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.util.List;
++import java.util.Map;
++
++public class OpenAIUtil  {
++    private static final String API_KEY = "YOUR_OPENAI_API_KEY"; // Replace with your OpenAI API key
++    private static final HttpClient client = HttpClient.newHttpClient();
++    private static final ObjectMapper mapper = new ObjectMapper();
++
++    public static float[] getEmbedding(String input) throws Exception {
++        Map<String, Object> payload = Map.of("input", input, "model", "text-embedding-ada-002");
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/embeddings"))
++                .header("Authorization", "Bearer " + API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(payload)))
++                .build();
++        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
++        return mapper.readTree(response.body()).get("data").get(0).get("embedding")
++                .traverse(mapper).readValueAs(float[].class);
++    }
++
++
++
++    public static String askWithContext(String question, String context) throws Exception {
++        Map<String, Object> messages = Map.of(
++                "model", "gpt-4",
++                "messages", List.of(
++                        Map.of("role", "system", "content", "Use the provided context to answer the question."),
++                        Map.of("role", "user", "content", context + "\n\nQuestion: " + question)
++                )
++        );
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/chat/completions"))
++                .header("Authorization", "Bearer " + API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(messages)))
++                .build();
++        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
++        return mapper.readTree(response.body()).get("choices").get(0).get("message").get("content").asText();
++    }
++
++    public static String askWithPrompt(String prompt) throws Exception {
++        Map<String, Object> messages = Map.of(
++                "model", "gpt-4",
++                "messages", List.of(
++                        Map.of("role", "user", "content", prompt)
++                )
++        );
++        HttpRequest request = HttpRequest.newBuilder()
++                .uri(URI.create("https://api.openai.com/v1/chat/completions"))
++                .header("Authorization", "Bearer " + API_KEY)
++                .header("Content-Type", "application/json")
++                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(messages)))
++                .build();
++        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
++        return mapper.readTree(response.body()).get("choices").get(0).get("message").get("content").asText();
++    }
++}
+Index: gradlew.bat
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/gradlew.bat b/gradlew.bat
+new file mode 100644
+--- /dev/null	(date 1753040796836)
++++ b/gradlew.bat	(date 1753040796836)
+@@ -0,0 +1,92 @@
++@rem
++@rem Copyright 2015 the original author or authors.
++@rem
++@rem Licensed under the Apache License, Version 2.0 (the "License");
++@rem you may not use this file except in compliance with the License.
++@rem You may obtain a copy of the License at
++@rem
++@rem      https://www.apache.org/licenses/LICENSE-2.0
++@rem
++@rem Unless required by applicable law or agreed to in writing, software
++@rem distributed under the License is distributed on an "AS IS" BASIS,
++@rem WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++@rem See the License for the specific language governing permissions and
++@rem limitations under the License.
++@rem
++
++@if "%DEBUG%"=="" @echo off
++@rem ##########################################################################
++@rem
++@rem  Gradle startup script for Windows
++@rem
++@rem ##########################################################################
++
++@rem Set local scope for the variables with windows NT shell
++if "%OS%"=="Windows_NT" setlocal
++
++set DIRNAME=%~dp0
++if "%DIRNAME%"=="" set DIRNAME=.
++@rem This is normally unused
++set APP_BASE_NAME=%~n0
++set APP_HOME=%DIRNAME%
++
++@rem Resolve any "." and ".." in APP_HOME to make it shorter.
++for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
++
++@rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
++set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
++
++@rem Find java.exe
++if defined JAVA_HOME goto findJavaFromJavaHome
++
++set JAVA_EXE=java.exe
++%JAVA_EXE% -version >NUL 2>&1
++if %ERRORLEVEL% equ 0 goto execute
++
++echo.
++echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
++echo.
++echo Please set the JAVA_HOME variable in your environment to match the
++echo location of your Java installation.
++
++goto fail
++
++:findJavaFromJavaHome
++set JAVA_HOME=%JAVA_HOME:"=%
++set JAVA_EXE=%JAVA_HOME%/bin/java.exe
++
++if exist "%JAVA_EXE%" goto execute
++
++echo.
++echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME%
++echo.
++echo Please set the JAVA_HOME variable in your environment to match the
++echo location of your Java installation.
++
++goto fail
++
++:execute
++@rem Setup the command line
++
++set CLASSPATH=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar
++
++
++@rem Execute Gradle
++"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %*
++
++:end
++@rem End local scope for the variables with windows NT shell
++if %ERRORLEVEL% equ 0 goto mainEnd
++
++:fail
++rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
++rem the _cmd.exe /c_ return code!
++set EXIT_CODE=%ERRORLEVEL%
++if %EXIT_CODE% equ 0 set EXIT_CODE=1
++if not ""=="%GRADLE_EXIT_CONSOLE%" exit %EXIT_CODE%
++exit /b %EXIT_CODE%
++
++:mainEnd
++if "%OS%"=="Windows_NT" endlocal
++
++:omega

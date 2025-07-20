@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="Gradle: org.apache.tika:tika-parser-ocr-module:3.1.0" type="java-imported" external-system-id="GRADLE">
+    <properties groupId="org.apache.tika" artifactId="tika-parser-ocr-module" version="3.1.0" />
+    <CLASSES>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/org.apache.tika/tika-parser-ocr-module/3.1.0/720891636711563df0a73087648a107926a17f18/tika-parser-ocr-module-3.1.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

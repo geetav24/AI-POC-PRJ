@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="Gradle: org.apache.tika:tika-core:3.1.0" type="java-imported" external-system-id="GRADLE">
+    <properties groupId="org.apache.tika" artifactId="tika-core" version="3.1.0" />
+    <CLASSES>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/org.apache.tika/tika-core/3.1.0/6ba44a9ddf8f6f2b4bc88e8bc64269aea0424607/tika-core-3.1.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

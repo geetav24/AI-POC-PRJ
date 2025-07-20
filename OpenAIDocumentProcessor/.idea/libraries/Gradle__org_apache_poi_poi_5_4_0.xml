@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="Gradle: org.apache.poi:poi:5.4.0" type="java-imported" external-system-id="GRADLE">
+    <properties groupId="org.apache.poi" artifactId="poi" version="5.4.0" />
+    <CLASSES>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/org.apache.poi/poi/5.4.0/c617c63e909df730a54e71a6962624476847eff6/poi-5.4.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
